@@ -1,0 +1,4 @@
+paho-mqtt
+requests
+python-telegram-bot
+python-dotenv

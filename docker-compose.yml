@@ -1,0 +1,41 @@
+version: '3.8'
+
+networks:
+  agent_network:
+    driver: bridge
+
+services:
+  agentdvr:
+    image: mekayelanik/ispyagentdvr:latest
+    container_name: agentdvr
+    ports:
+      - "8090:8090"
+    restart: unless-stopped
+    networks:
+      - agent_network
+    volumes:
+      - ./agentdvr/config:/AgentDVR/Config
+      - ./agentdvr/media:/AgentDVR/Media
+
+  mqtt:
+    build: ./mqtt  # Uses our custom Dockerfile
+    container_name: mqtt
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    restart: unless-stopped
+    networks:
+      - agent_network
+
+  telegram_bot:
+    build:
+      context: ./telegram
+      dockerfile: Dockerfile
+    container_name: telegram_bot
+    depends_on:
+      - mqtt
+    restart: unless-stopped
+    networks:
+      - agent_network
+    env_file:
+      - .env
