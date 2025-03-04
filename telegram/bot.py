@@ -1,112 +1,133 @@
 import paho.mqtt.client as mqtt
 import requests
+import base64
 import os
-import json
+import time
+import binascii
 from dotenv import load_dotenv
-from telegram import Update, Bot
-from telegram.ext import Updater, CommandHandler, CallbackContext
 
-# Load environment variables from .env
+# Load environment variables
 load_dotenv()
+
+# Telegram Bot Credentials from .env
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID"))  # Your Telegram ID for admin control
-MQTT_BROKER = "mqtt"
+TELEGRAM_CHAT_ID = os.getenv("ADMIN_CHAT_ID")  # Using the ADMIN_CHAT_ID from your .env
+
+# MQTT Broker Details - Using Docker service name
+MQTT_BROKER = "mqtt"  # Docker service name from docker-compose
 MQTT_PORT = 1883
-MQTT_TOPIC = "agentdvr/#"
-
-# Store user chat IDs dynamically
-CHAT_ID_FILE = "subscribers.json"
-
-def load_chat_ids():
-    """Load chat IDs from file"""
-    if os.path.exists(CHAT_ID_FILE):
-        with open(CHAT_ID_FILE, "r") as f:
-            return json.load(f)
-    return []
-
-def save_chat_ids(chat_ids):
-    """Save chat IDs to file"""
-    with open(CHAT_ID_FILE, "w") as f:
-        json.dump(chat_ids, f)
-
-def start(update: Update, context: CallbackContext):
-    """Handles /start command and registers users"""
-    chat_id = update.message.chat_id
-    chat_ids = load_chat_ids()
-
-    if chat_id not in chat_ids:
-        chat_ids.append(chat_id)
-        save_chat_ids(chat_ids)
-        update.message.reply_text("✅ You are now subscribed to alerts!")
-    else:
-        update.message.reply_text("⚡ You are already subscribed.")
-
-def stop(update: Update, context: CallbackContext):
-    """Handles /stop command and removes users"""
-    chat_id = update.message.chat_id
-    chat_ids = load_chat_ids()
-
-    if chat_id in chat_ids:
-        chat_ids.remove(chat_id)
-        save_chat_ids(chat_ids)
-        update.message.reply_text("🚫 You have been unsubscribed from alerts.")
-    else:
-        update.message.reply_text("⚠️ You are not subscribed.")
-
-def remove_user(chat_id):
-    """Admin removes a user manually"""
-    chat_ids = load_chat_ids()
-    if chat_id in chat_ids:
-        chat_ids.remove(chat_id)
-        save_chat_ids(chat_ids)
+MQTT_TOPIC = "agentdvr/#"  # Listen to all agentdvr topics
 
 def send_telegram_text(message):
-    """ Sends a text alert to all subscribed Telegram users """
-    chat_ids = load_chat_ids()
-    if not chat_ids:
-        print("❌ No subscribers.")
-        return
-
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    for chat_id in chat_ids:
-        data = {"chat_id": chat_id, "text": message}
-        requests.post(url, data=data)
+    data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
+    response = requests.post(url, data=data)
+    print(f"Telegram Text Response: {response.json()}")
+
+def send_telegram_image(image_data, source_topic):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+        image_path = f"/tmp/mqtt_alert_{int(time.time())}.jpg"
+        
+        with open(image_path, "wb") as img_file:
+            img_file.write(image_data)
+        
+        # Send both the image and information about its source
+        caption = f"Alert image from topic: {source_topic}"
+        
+        with open(image_path, "rb") as img_file:
+            response = requests.post(
+                url, 
+                data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption}, 
+                files={"photo": img_file}
+            )
+        print(f"Telegram Image Response: {response.json()}")
+        return True
+    except Exception as e:
+        print(f"Error sending image to Telegram: {e}")
+        return False
 
 def on_connect(client, userdata, flags, rc):
-    """ Handles connection to MQTT broker """
-    if rc == 0:
-        print(f"✅ Connected to MQTT Broker: {MQTT_BROKER}:{MQTT_PORT}")
-        client.subscribe(MQTT_TOPIC)
-        send_telegram_text("🚀 Telegram bot connected to MQTT and ready for alerts!")
-    else:
-        print(f"❌ Connection failed with code {rc}")
+    print(f"Connected to MQTT Broker with result code {rc}")
+    client.subscribe(MQTT_TOPIC)
+    print(f"Subscribed to topic: {MQTT_TOPIC}")
+    # Send test message on startup
+    send_telegram_text("Telegram bot connected to MQTT broker and ready for alerts!")
 
 def on_message(client, userdata, msg):
-    """ Handles incoming MQTT messages """
-    print(f"📥 Received MQTT message on topic: {msg.topic}")
-    send_telegram_text(f"⚡ Alert from {msg.topic}!\n{msg.payload.decode()}")
+    print(f"Received MQTT message on topic: {msg.topic}")
+    print(f"Payload length: {len(msg.payload)} bytes")
+    
+    try:
+        # Check if this is one of the image topics from the logs
+        if msg.topic == "agentdvr/snapshot" or msg.topic == "agentdvr/image":
+            print(f"Processing image from {msg.topic}")
+            
+            # Try to detect if it's base64 encoded or raw binary
+            try:
+                # First check if it's base64 text
+                if len(msg.payload) > 20:  # Arbitrary small size check
+                    start_bytes = msg.payload[:20]
+                    # Check if it starts with base64 image markers
+                    if b'data:image' in start_bytes or b'/9j/' in start_bytes or b'iVBOR' in start_bytes:
+                        print("Detected base64 encoded image")
+                        image_data = base64.b64decode(msg.payload)
+                    else:
+                        # Assume it's already binary data
+                        print("Assuming raw binary image data")
+                        image_data = msg.payload
+                        
+                    success = send_telegram_image(image_data, msg.topic)
+                    if not success:
+                        send_telegram_text(f"Failed to process image from {msg.topic}")
+            except binascii.Error:
+                print("Not valid base64, treating as raw binary")
+                send_telegram_image(msg.payload, msg.topic)
+            except Exception as e:
+                print(f"Error processing image: {e}")
+                send_telegram_text(f"Error processing image from {msg.topic}: {str(e)}")
+        else:
+            # For non-image topics, send as text
+            try:
+                payload = msg.payload.decode()
+                print(f"Text payload: {payload}")
+                send_telegram_text(f"Alert from {msg.topic}!\n{payload}")
+            except UnicodeDecodeError:
+                # If we can't decode as text, it might be binary data
+                print("Payload is not UTF-8 text, might be binary data")
+                if len(msg.payload) > 100:  # Arbitrary size to guess if it might be an image
+                    try:
+                        send_telegram_image(msg.payload, msg.topic)
+                    except Exception as e:
+                        print(f"Failed to send as image: {e}")
+                        send_telegram_text(f"Received binary data on {msg.topic} (payload too large to display)")
+                else:
+                    # Small binary data, just show hex
+                    hex_data = msg.payload.hex()
+                    send_telegram_text(f"Binary data received on {msg.topic}: {hex_data[:50]}...")
+    except Exception as e:
+        print(f"Error processing MQTT message: {e}")
+        send_telegram_text(f"Error processing message from {msg.topic}: {str(e)}")
 
 def main():
-    """ Starts the MQTT client and Telegram bot """
-    print("🚀 Starting Telegram Bot...")
-    
-    # Set up MQTT
+    print("Starting Telegram Bot...")
     client = mqtt.Client()
     client.on_connect = on_connect
     client.on_message = on_message
-    client.connect(MQTT_BROKER, MQTT_PORT, 60)
-    
-    # Start MQTT loop
-    client.loop_start()
 
-    # Start Telegram Bot
-    updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
-    dp = updater.dispatcher
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("stop", stop))
-    updater.start_polling()
-    updater.idle()
+    # Keep trying to connect to MQTT broker
+    while True:
+        try:
+            print(f"Attempting to connect to MQTT broker at {MQTT_BROKER}:{MQTT_PORT}")
+            client.connect(MQTT_BROKER, MQTT_PORT, 60)
+            break
+        except Exception as e:
+            print(f"Failed to connect to MQTT broker: {e}")
+            print("Retrying in 5 seconds...")
+            time.sleep(5)
+
+    print("Starting MQTT loop...")
+    client.loop_forever()
 
 if __name__ == "__main__":
     main()
-
