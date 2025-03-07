@@ -4,15 +4,23 @@ import base64
 import os
 import time
 import binascii
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Telegram Bot Credentials
-TELEGRAM_BOT_TOKEN = "7651172867:AAGLgb2Iocw8uihZ9o2kSTfqaiIMoXa9OiA"
-TELEGRAM_CHAT_ID = "7854994644"
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # MQTT Broker Details - Using Docker service name
-MQTT_BROKER = "mqtt"  # Docker service name from docker-compose
-MQTT_PORT = 1883
-MQTT_TOPIC = "agentdvr/#"  # Listen to all agentdvr topics
+MQTT_BROKER = os.getenv("MQTT_BROKER", "mqtt")  # Docker service name from docker-compose
+MQTT_PORT = int(os.getenv("MQTT_PORT", 1883))
+MQTT_TOPIC = os.getenv("MQTT_TOPIC", "agentdvr/#")  # Listen to all agentdvr topics
+
+# Validate required environment variables
+if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID]):
+    raise ValueError("Missing required environment variables. Please check your .env file.")
 
 def send_telegram_text(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
